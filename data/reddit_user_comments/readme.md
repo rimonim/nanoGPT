@@ -1,0 +1,12 @@
+
+## Reddit user comments dataset
+
+Full comment histories of contributors to the most right-wing groups (conservative) and the most left-wing groups (liberal), maintaining each user history in chronological order. A subreddit name and timestamp precede each comment, but commenter usernames are omitted. 
+
+After running `prepare.py` (preprocess) for each group we get:
+
+- conservative/train.bin is ~4.5GB (53,102 users; 2,246,320,305 tokens)
+- conservative/val.bin is ~22MB (267 users; 10,884,251 tokens)
+
+- liberal/train.bin is ~8.4GB (83,899 users; 4,213,305,995 tokens)
+- liberal/val.bin is ~41MB (422 users; 20,604,068 tokens)

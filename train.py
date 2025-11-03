@@ -135,13 +135,20 @@ iter_num = 0
 best_val_loss = 1e9
 
 # attempt to derive vocab_size from the dataset
-meta_path = os.path.join(data_dir, 'meta.pkl')
+meta_pickle_path = os.path.join(data_dir, 'meta.pkl')
+meta_json_path = os.path.join(data_dir, 'meta.json')
 meta_vocab_size = None
-if os.path.exists(meta_path):
-    with open(meta_path, 'rb') as f:
+if os.path.exists(meta_pickle_path):
+    with open(meta_pickle_path, 'rb') as f:
         meta = pickle.load(f)
     meta_vocab_size = meta['vocab_size']
-    print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
+    print(f"found vocab_size = {meta_vocab_size} (inside {meta_pickle_path})")
+elif os.path.exists(meta_json_path):
+    # vocab size is not directly saved in json, so we need to load the tokenizer to get it
+    from tokenizers import Tokenizer
+    tokenizer = Tokenizer.from_file(meta_json_path)
+    meta_vocab_size = tokenizer.get_vocab_size()
+    print(f"found vocab_size = {meta_vocab_size} (inside {meta_json_path})")
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
