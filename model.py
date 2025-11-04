@@ -5,6 +5,12 @@ References:
 https://github.com/openai/gpt-2/blob/master/src/model.py
 2) huggingface/transformers PyTorch implementation:
 https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
+
+This implementation is slightly modernized, with the following changes adapted from karpathy/nanochat:
+- Rotary positional embeddings
+- RMSNorm instead of LayerNorm
+- QK norm
+- ReLU² activation instead of GELU
 """
 
 import math
@@ -15,16 +21,23 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-class LayerNorm(nn.Module):
-    """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 
-    def __init__(self, ndim, bias):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(ndim))
-        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
+def norm(x):
+    """RMSNorm without learnable parameters"""
+    return F.rms_norm(x, (x.size(-1),))
 
-    def forward(self, input):
-        return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
+
+def apply_rotary_emb(x, cos, sin):
+    """Apply rotary embeddings to input tensor"""
+    assert x.ndim == 4  # multihead attention
+    d = x.shape[3] // 2
+    x1, x2 = x[..., :d], x[..., d:]  # split up last dim into two halves
+    y1 = x1 * cos + x2 * sin  # rotate pairs of dims
+    y2 = x1 * (-sin) + x2 * cos
+    out = torch.cat([y1, y2], 3)  # re-assemble
+    out = out.to(x.dtype)  # ensure input/output dtypes match
+    return out
+
 
 class CausalSelfAttention(nn.Module):
 
@@ -49,7 +62,7 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
-    def forward(self, x):
+    def forward(self, x, cos_sin=None):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -57,6 +70,14 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+
+        # Apply rotary embeddings if provided
+        if cos_sin is not None:
+            cos, sin = cos_sin
+            q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
+
+        # QK normalization
+        q, k = norm(q), norm(k)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
@@ -80,13 +101,14 @@ class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.gelu    = nn.GELU()
+        # self.gelu    = nn.GELU()
         self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
         x = self.c_fc(x)
-        x = self.gelu(x)
+        # x = self.gelu(x)
+        x = F.relu(x).square()  # ReLU² activation
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
@@ -95,14 +117,12 @@ class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+    def forward(self, x, cos_sin=None):
+        x = x + self.attn(norm(x), cos_sin)
+        x = x + self.mlp(norm(x))
         return x
 
 @dataclass
@@ -125,10 +145,8 @@ class GPT(nn.Module):
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
@@ -136,6 +154,13 @@ class GPT(nn.Module):
         # This behavior is deprecated and will be an error in future versions"
         # not 100% sure what this is, so far seems to be harmless. TODO investigate
         self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+
+        # Precompute rotary embeddings (over-compute for flexibility)
+        self.rotary_seq_len = config.block_size * 1  # 10X over-compute
+        head_dim = config.n_embd // config.n_head
+        cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
+        self.register_buffer("cos", cos, persistent=False)
+        self.register_buffer("sin", sin, persistent=False)
 
         # init all weights
         self.apply(self._init_weights)
@@ -147,16 +172,11 @@ class GPT(nn.Module):
         # report number of parameters
         print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
 
-    def get_num_params(self, non_embedding=True):
+    def get_num_params(self):
         """
         Return the number of parameters in the model.
-        For non-embedding count (default), the position embeddings get subtracted.
-        The token embeddings would too, except due to the parameter sharing these
-        params are actually used as weights in the final layer, so we include them.
         """
         n_params = sum(p.numel() for p in self.parameters())
-        if non_embedding:
-            n_params -= self.transformer.wpe.weight.numel()
         return n_params
 
     def _init_weights(self, module):
@@ -167,19 +187,38 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
+    def _precompute_rotary_embeddings(self, seq_len, head_dim, base=10000, device=None):
+        """Precompute rotary embeddings for positional encoding"""
+        # autodetect the device from model embeddings
+        if device is None:
+            device = self.transformer.wte.weight.device
+        # stride the channels
+        channel_range = torch.arange(0, head_dim, 2, dtype=torch.float32, device=device)
+        inv_freq = 1.0 / (base ** (channel_range / head_dim))
+        # stride the time steps
+        t = torch.arange(seq_len, dtype=torch.float32, device=device)
+        # calculate the rotation frequencies at each (time, channel) pair
+        freqs = torch.outer(t, inv_freq)
+        cos, sin = freqs.cos(), freqs.sin()
+        cos, sin = cos.bfloat16(), sin.bfloat16()  # keep them in bfloat16
+        cos, sin = cos[None, None, :, :], sin[None, None, :, :]  # add batch and head dims: [1, 1, seq_len, head_dim]
+        return cos, sin
+
     def forward(self, idx, targets=None):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        assert t <= self.cos.size(2), f"Sequence length grew beyond the rotary embeddings cache: {t} > {self.cos.size(2)}"
+
+        # Grab the rotary embeddings for the current sequence length
+        cos_sin = self.cos[:, :, :t], self.sin[:, :, :t]  # truncate to current sequence length
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
+        x = self.transformer.drop(tok_emb)
         for block in self.transformer.h:
-            x = block(x)
-        x = self.transformer.ln_f(x)
+            x = block(x, cos_sin)
+        x = norm(x)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
@@ -198,7 +237,6 @@ class GPT(nn.Module):
         # but want to use a smaller block size for some smaller, simpler model
         assert block_size <= self.config.block_size
         self.config.block_size = block_size
-        self.transformer.wpe.weight = nn.Parameter(self.transformer.wpe.weight[:block_size])
         for block in self.transformer.h:
             if hasattr(block.attn, 'bias'):
                 block.attn.bias = block.attn.bias[:,:,:block_size,:block_size]
