@@ -30,12 +30,19 @@ def preprocess_reddit_comments(files, idx=None, sample_size=None, progress_bar=T
         except Exception as e:
             skipped += 1
             continue
+        # reverse df for ascending chronological order
+        df = df.iloc[::-1]
         user_text = ''
         for _, row in df.iterrows():
             subreddit = row['subreddit']
             # use either created_utc or date_utc, depending on which is available
             date_utc = pd.to_datetime(row['created_utc'], unit='s').strftime('%Y-%m-%d %H:%M') if 'created_utc' in row else row['date_utc']
             comment = row['body'] if 'body' in row else row['comment']
+            # skip deleted, removed, or empty comments
+            if pd.isna(comment):
+                continue
+            if comment in ['[deleted]', '[removed]', None, '', 'nan', '.']:
+                continue
             user_text += f'[{subreddit} - {date_utc}] {comment}\n'
         texts.append(f'<|endoftext|>\n{user_text}\n')
 
@@ -44,6 +51,7 @@ def preprocess_reddit_comments(files, idx=None, sample_size=None, progress_bar=T
     
     # replace full urls with special token
     texts = [re.sub(r"(?<=\()https?:\S*(?=\))", '<|url|>', text) for text in texts] # within parentheses
+    texts = [re.sub(r"(?<=\[)https?:\S*(?=\])", '<|url|>', text) for text in texts] # within square brackets
     texts = [re.sub(r"https?:\S*", '<|url|>', text) for text in texts] # standalone
 
     return texts
