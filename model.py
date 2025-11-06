@@ -10,7 +10,7 @@ This implementation is slightly modernized, with the following changes adapted f
 - Rotary positional embeddings
 - RMSNorm instead of LayerNorm
 - QK norm
-- ReLU² activation instead of GELU
+- SwiGLU activation instead of GELU
 """
 
 import math
@@ -100,15 +100,22 @@ class MLP(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        # self.gelu    = nn.GELU()
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        # SwiGLU uses two separate projections: one for the gate, one for the value
+        # We use 8/3 * hidden_dim to keep parameter count similar to standard FFN with 4*hidden_dim
+        hidden_dim = int(8 * config.n_embd / 3)
+        # Round up to nearest multiple of 256 for efficiency
+        hidden_dim = ((hidden_dim + 255) // 256) * 256
+        self.c_fc    = nn.Linear(config.n_embd, hidden_dim, bias=config.bias)
+        self.c_gate  = nn.Linear(config.n_embd, hidden_dim, bias=config.bias)
+        self.c_proj  = nn.Linear(hidden_dim, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
-        x = self.c_fc(x)
-        # x = self.gelu(x)
-        x = F.relu(x).square()  # ReLU² activation
+        # SwiGLU: swish(gate) * value
+        value = self.c_fc(x)
+        gate = self.c_gate(x)
+        gate = F.silu(gate)
+        x = gate * value
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
