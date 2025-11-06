@@ -5,8 +5,8 @@ Full comment histories of contributors to the most right-wing groups (conservati
 
 After running `prepare.py` (preprocess) for each group we get:
 
-- conservative/train.bin is ~4.5GB (53,102 users; 2,246,320,305 tokens)
-- conservative/val.bin is ~22MB (267 users; 10,884,251 tokens)
+- conservative/train.bin is ~4.2GB (53,102 users; 2,112,936,727 tokens)
+- conservative/val.bin is ~22MB (267 users; 10,868,900 tokens)
 
-- liberal/train.bin is ~8.4GB (83,899 users; 4,213,305,995 tokens)
-- liberal/val.bin is ~41MB (422 users; 20,604,068 tokens)
+- liberal/train.bin is ~7.9GB (83,899 users; 3,969,122,041 tokens)
+- liberal/val.bin is ~38MB (422 users; 18,730,019 tokens)
