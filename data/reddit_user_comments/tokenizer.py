@@ -19,7 +19,7 @@ tokenizer.normalizer = normalizers.NFKC()
 tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel()
 tokenizer.decoder = decoders.ByteLevel()
 tokenizer.post_processor = processors.ByteLevel()
-trainer = trainers.BpeTrainer(vocab_size=32768, min_frequency=100, special_tokens=['<|endoftext|>', '<|url|>'],initial_alphabet=[chr(i) for i in range(256)])
+trainer = trainers.BpeTrainer(vocab_size=16384, min_frequency=100, special_tokens=['<|endoftext|>'],initial_alphabet=[chr(i) for i in range(256)])
 tokenizer.train_from_iterator(texts, trainer=trainer)
 
 # save the tokenizer
